@@ -5,10 +5,23 @@ import plotly.graph_objects as go
 import pypsa
 import geopandas as gpd
 import pandas as pd
+import numpy as np
 import cartopy.crs as ccrs
 import re
 import warnings
 warnings.filterwarnings("ignore")
+
+fs = 13
+plt.rcParams['axes.labelsize'] = fs
+plt.rcParams['xtick.labelsize'] = fs
+plt.rcParams['ytick.labelsize'] = fs
+plt.rcParams['xtick.direction'] = 'out'
+plt.rcParams['ytick.direction'] = 'out'
+plt.rcParams['axes.axisbelow'] = True
+plt.rcParams['legend.title_fontsize'] = fs
+plt.rcParams['legend.fontsize'] = fs
+
+country = "GB"
 
 simple_names_dict= {'GBM': 'GB scotland',
                     'GBD': 'GB north west',
@@ -79,7 +92,7 @@ def make_hovertemplate(v, unit):
 
 import yaml
 
-with open('scripts/plotting.yaml') as file:
+with open('plotting.yaml') as file:
     config_i = yaml.safe_load(file)
 config_plotting = config_i["plotting"]
 tech_colors = config_plotting["tech_colors"]
@@ -99,6 +112,35 @@ tech_colors["CCUS"] = tech_colors["CO2 sequestration"]
 tech_colors["urban central biogas CHP"] = "olive"
 tech_colors['TES central discharger'] = "#FFA500"  # orange
 tech_colors['TES decentral discharger'] = "#FF8C00"  # dark orange
+tech_colors["electrolytic H2"] = tech_colors["H2"]
+tech_colors['heating'] = tech_colors["ground heat pump"]
+tech_colors['residential heating'] = tech_colors["air heat pump"]
+tech_colors["land transport"] = tech_colors["EV battery"]
+tech_colors['residential electricity'] = "#a2a2a2"
+tech_colors['industry electricity'] = "#3f4b38"
+tech_colors['agriculture electricity'] = "#521010"
+tech_colors['CCUS'] = "#ff002b"
+tech_colors["urban decentral heat"] = "#ca9c92"
+tech_colors["rural heat"] = "#C30202"
+tech_colors['electrified heating (urban central)'] = tech_colors["urban central heat"]
+tech_colors['electrified heating (urban decentral)'] = tech_colors["urban decentral heat"]
+tech_colors['electrified heating (rural)'] = tech_colors["rural heat"] 
+tech_colors["agriculture heat"] = "#B4B4B4"  # saddle brown
+tech_colors["low-temperature heat for industry"] = "#656565"  # peru
+tech_colors["medium heat for industry"] = "#291F1A"  # sienna
+tech_colors["high heat for industry"] = "#000000"  # chocolate
+
+preferred_order_demand = pd.Index(['residential electricity',
+                                    'industry electricity',
+                                    'agriculture electricity',
+                                    'electrified heating (urban central)',
+                                    'electrified heating (urban decentral)',
+                                    'electrified heating (rural)',
+                                    'land transport',
+                                    'ammonia', 
+                                    'CCUS', 
+                                    'electrolytic H2',
+                                    ])
 
 preferred_order_heating = pd.Index([
                                      'air heat pump',
@@ -202,11 +244,6 @@ def calculate_endogenous_demand(n):
         elec_demand_via_links.index[elec_demand_via_links.index.str.contains("battery")]
     )
 
-    # Drop LDES
-    elec_demand_via_links = elec_demand_via_links.drop(
-        elec_demand_via_links.index[elec_demand_via_links.index.str.contains("LDES")]
-    )
-
     # Drop distribution links
     elec_demand_via_links = elec_demand_via_links.drop(
         elec_demand_via_links.index[
@@ -217,6 +254,54 @@ def calculate_endogenous_demand(n):
     endogenous_demand = n.links_t.p0[elec_demand_via_links.index]
 
     return endogenous_demand
+
+def calculate_demand_by_sector(n):
+    ###############
+    end_demand = calculate_endogenous_demand(n)
+    end_demand = end_demand.T.groupby([n.links.loc[end_demand.columns].bus1.str.replace(" low voltage", ""),
+                                        n.links.loc[end_demand.columns].carrier]).sum().sum(axis=1)
+    end_demand_UK = end_demand.loc[end_demand.index.get_level_values(0).str.contains(country)]
+    end_demand_UK = pd.DataFrame(end_demand_UK)
+    end_demand_UK["bus1"] = end_demand_UK.index.get_level_values(0).str.replace("GB central england ", "").str.replace("GB north west ", "").str.replace("GB south east ", "").str.replace("GB south west ", "").str.replace("GB wales cymru ", "").str.replace("GB scotland ", "").str.replace("GB north east yorkshire humber ", "").str.replace("GB west midland ", "").str.replace("GB east midland ", "").str.replace("GB greater london ", "").str.replace("GB north ireland 0 ", "").str.replace("GB east ", "")
+
+    end_demand_UK.set_index([end_demand_UK.index.get_level_values(1), 
+                                                end_demand_UK["bus1"]], inplace=True)
+    end_demand_UK = end_demand_UK.drop(columns=["bus1"]).groupby(level=[0,1]).sum().reset_index()
+    end_demand_UK_heating = end_demand_UK.loc[end_demand_UK.bus1.str.contains("heat")]
+    end_demand_UK_heating = end_demand_UK_heating.drop(index = end_demand_UK_heating.query("carrier == 'DAC'").index)
+    end_demand_UK_heating["carrier"] = end_demand_UK_heating["bus1"]
+
+    end_demand_UK.loc[end_demand_UK_heating.index, :] = end_demand_UK_heating.values
+    end_demand_UK = end_demand_UK.set_index("bus1").drop(columns="carrier")
+    #############
+    exo_demand = n.loads_t.p[n.loads.carrier[n.loads.carrier.str.contains("electricity")].index]
+    exo_demand = exo_demand.T.groupby([n.loads.loc[exo_demand.columns].bus.str.replace(" low voltage", ""),
+                                    n.loads.loc[exo_demand.columns].carrier]).sum().sum(axis=1).unstack()
+    exo_demand_UK = exo_demand.loc[exo_demand.index.str.contains(country)].sum()
+
+    demand_by_sector = pd.concat([end_demand_UK, exo_demand_UK])
+
+    demand_by_sector.rename(index = {"EV battery": "land transport",
+                                    "DAC": "CCUS",
+                                    "agriculture electricity": "industry electricity",
+                                    "H2": "electrolytic H2",
+                                    "Haber-Bosch": "ammonia",
+                                    "electricity": "residential electricity",
+                                    "rural heat": 'electrified heating (rural)', 
+                                    "urban central heat": 'electrified heating (urban central)',
+                                    "urban decentral heat": 'electrified heating (urban decentral)',
+                                    }, inplace=True)
+
+    demand_by_sector = demand_by_sector.groupby(demand_by_sector.index).sum()
+
+    return demand_by_sector[0]
+
+def calculate_heating_demand_by_sector(n):
+    heat_loads = n.loads.loc[n.loads.index.str.contains("heat")]
+    heat_loads_UK = heat_loads.loc[heat_loads.index.str.contains(country)]
+    heat_loads_UK_by_sector = n.loads_t.p[heat_loads_UK.index].T.groupby(heat_loads_UK.carrier).sum().sum(axis=1)
+
+    return heat_loads_UK_by_sector
 
 def add_year_label(regions_dict, years, scen):
     regions = regions_dict[f"{scen}-2025"][["country", "parent", "contains", "substations", "geometry"]]
@@ -262,10 +347,15 @@ def calculate_capacities_at_regions(n, techs, mapping = False, admin_shapes_path
     stores.loc[urban_central_water.index, "carrier"] = "TES central"
     stores.loc[decentral_water.index, "carrier"] = "TES decentral"
 
-    urban_central_water_links = links.loc[links.carrier.str.contains("urban central water")]
-    decentral_water_links = links.loc[links.carrier.str.contains("rural water|urban decentral water")]
+    urban_central_water_links = links.loc[links.carrier.str.contains("urban central water tanks discharger|water pits discharger")]
+    decentral_water_links = links.loc[links.carrier.str.contains("rural water tanks discharger|urban decentral water tanks discharger")]
     links.loc[urban_central_water_links.index, "carrier"] = "TES central discharger"
     links.loc[decentral_water_links.index, "carrier"] = "TES decentral discharger"
+
+    urban_central_water_links_charge = links.loc[links.carrier.str.contains("urban central water tanks charger")]
+    decentral_water_links_charge = links.loc[links.carrier.str.contains("rural water tanks charger|urban decentral water tanks charger")]
+    links.loc[urban_central_water_links_charge.index, "carrier"] = "TES central charger"
+    links.loc[decentral_water_links_charge.index, "carrier"] = "TES decentral charger"
 
     # remove prefix from CHP unit names
     heat_links_bus1 = links.loc[links.bus1.str.contains("heat")]
@@ -277,28 +367,27 @@ def calculate_capacities_at_regions(n, techs, mapping = False, admin_shapes_path
     n.stores = stores
     n.links = links
 
+    regions =  gpd.read_file(admin_shapes_path)
     if mapping:
-        regions =  gpd.read_file("data/uk_regions_onshore_admin_11.geojson")
         regions.set_index("name", inplace=True)
         regions = regions.rename(index = {"GB north ireland": "GB north ireland 0"})
     else:
-        regions =  gpd.read_file(admin_shapes_path)
         regions = regions.rename(columns = {"admin": "name"})
         regions.set_index("name", inplace=True)
         regions = regions.rename(index = {"GBN0B+1": "GBN 0"})
-        regions = regions.loc[regions.index.str.contains("GB")]
+        regions = regions.loc[regions.index.str.contains(country)]
 
     regions = regions.to_crs(data_crs)
 
-    uk_buses = n.buses.query("carrier == 'AC'").query("country == 'GB'").index
+    uk_buses = n.buses.query("carrier == 'AC'").query(f"country == '{country}'").index
     unit = "GW"
 
     links = n.links
-    links_uk = links.loc[links.index.str.contains("GB")]
+    links_uk = links.loc[links.index.str.contains(country)]
     links_capacity = links_uk.p_nom_opt*links_uk.efficiency
 
     stores = n.stores
-    stores_uk = stores.loc[stores.index.str.contains("GB")]
+    stores_uk = stores.loc[stores.index.str.contains(country)]
     stores_capacity = stores_uk.e_nom_opt
 
     conversion = 1/(1e3) if unit == "GW" else 1
@@ -315,7 +404,7 @@ def calculate_capacities_at_regions(n, techs, mapping = False, admin_shapes_path
 
             stores_capacity_tech = stores_capacity_tech.T.loc[stores_capacity_tech.columns.str.contains(tech)].T.unstack().dropna()
 
-            index_bus = stores_capacity_tech.loc[stores_capacity_tech.index.get_level_values(1).str.contains("GB")].reset_index()
+            index_bus = stores_capacity_tech.loc[stores_capacity_tech.index.get_level_values(1).str.contains(country)].reset_index()
 
             for i in range(len(index_bus)):
                 match_bus = next((name for name in regions.index if name in index_bus["bus"].iloc[i]), None)
@@ -346,8 +435,8 @@ def calculate_capacities_at_regions(n, techs, mapping = False, admin_shapes_path
 
             links_capacity_tech = links_capacity_tech.T.loc[links_capacity_tech.columns.str.contains(tech)].T.reset_index().fillna(0)
 
-            index_bus0 = links_capacity_tech.loc[links_capacity_tech["bus0"].str.contains("GB")].reset_index()
-            index_bus1 = links_capacity_tech.loc[links_capacity_tech["bus1"].str.contains("GB")].reset_index()
+            index_bus0 = links_capacity_tech.loc[links_capacity_tech["bus0"].str.contains(country)].reset_index()
+            index_bus1 = links_capacity_tech.loc[links_capacity_tech["bus1"].str.contains(country)].reset_index()
 
             # ensure no overlapping indices
             index_bus1 = index_bus1.loc[~index_bus1["index"].isin(index_bus0["index"])]
@@ -410,16 +499,15 @@ def calculate_capacities_at_regions(n, techs, mapping = False, admin_shapes_path
 
 def add_to_regions(df, mapping = False, admin_shapes_path = "data/admin_shapes.geojson"):
 
+    regions =  gpd.read_file(admin_shapes_path)
     if mapping:
-        regions =  gpd.read_file("data/uk_regions_onshore_admin_11.geojson")
         regions.set_index("name", inplace=True)
         regions = regions.rename(index = {"GB north ireland": "GB north ireland 0"})
     else:
-        regions =  gpd.read_file(admin_shapes_path)
         regions = regions.rename(columns = {"admin": "name"})
         regions.set_index("name", inplace=True)
         regions = regions.rename(index = {"GBN0B+1": "GBN 0"})
-        regions = regions.loc[regions.index.str.contains("GB")]
+        regions = regions.loc[regions.index.str.contains(country)]
 
     regions = regions.to_crs(data_crs)
 
@@ -456,7 +544,7 @@ def calculate_generation_mix(n):
     df = pd.concat([df_1, df_2, df_3, df_4], axis=0).sort_index()
 
     # only use GB nodes
-    df = df.loc[df.index.get_level_values(0).str.contains("GB")]
+    df = df.loc[df.index.get_level_values(0).str.contains(country)]
 
     return df
 
@@ -483,7 +571,7 @@ def calculate_heating_generation_mix(n):
     heating_generation.loc[:, heating_generation_p2.columns] = heating_generation_p2
 
     # get UK elements
-    heating_generation_uk = heating_generation.loc[heating_generation.index.str.contains("GB")]
+    heating_generation_uk = heating_generation.loc[heating_generation.index.str.contains(country)]
 
     return heating_generation_uk
 
@@ -499,7 +587,7 @@ def calculate_electricity_demand(n):
     nodal_demand = end_demand + exo_demand
 
     # only use GB nodes
-    nodal_demand = nodal_demand.loc[:, nodal_demand.columns.str.contains("GB")].T
+    nodal_demand = nodal_demand.loc[:, nodal_demand.columns.str.contains(country)].T
     
     return nodal_demand
 
@@ -510,7 +598,7 @@ def calculate_heating_demand(n):
     exo_demand = exo_demand.groupby(exo_demand.index).sum().T
 
     # only use GB nodes
-    nodal_demand = exo_demand.loc[:, exo_demand.columns.str.contains("GB")].T
+    nodal_demand = exo_demand.loc[:, exo_demand.columns.str.contains(country)].T
     
     return nodal_demand
 
@@ -801,47 +889,80 @@ def make_interactive_map(token, capacity, filename, years, scen, n_mapping = Fal
     fig.write_html(f"figures/{scen}_{filename}.html", config={"scrollZoom": True})
 
 def plot_energy_mix(variables, scen, years, var_label = "annual_heat_demand_TWh", preferred_order = preferred_order_heating):
-
-    df_1 = pd.DataFrame(index = years) # demand
-    df_2 = pd.DataFrame(index = years) # supply
+    
+    df_1 = pd.DataFrame(index = years) # supply
+    df_2 = pd.DataFrame(index = years) # demand by sector
 
     for year in years:
-        var_1 = variables[0][f"{scen}-{year}"][var_label].sum()
-        var_2 = variables[1][f"{scen}-{year}"].drop(columns = ["country", "parent", "contains", "substations", "geometry"])
+        var_1 = variables[0][f"{scen}-{year}"].drop(columns = ["country", "parent", "contains", "substations", "geometry"])
+        var_2 = variables[1][f"{scen}-{year}"]
         
         if "heat" in var_label:
-            var_2.columns = var_2.columns.str.replace("rural ","")
-            var_2 = var_2.T.groupby(var_2.columns).sum().T.drop(columns = ["DAC"])
+            var_1.columns = var_1.columns.str.replace("rural ","")
+            var_1 = var_1.T.groupby(var_1.columns).sum().T.drop(columns = ["DAC"])
 
-        df_2.loc[year, 
-                var_2.columns] = var_2.sum()
+        df_1.loc[year, 
+                var_1.columns] = var_1.sum()
 
-        df_1.loc[year, "value"] = var_1
+        df_2.loc[year, var_2.index] = var_2.values
 
-    new_columns = df_2.columns[df_2.sum() / (df_2.sum().sum()) > 0.001]
-    df_2 = df_2[new_columns]
+    new_columns = df_1.columns[df_1.sum() / (df_1.sum().sum()) > 0.001]
+    df_1 = df_1[new_columns]
 
-    new_index = preferred_order.intersection(df_2.columns).append(
-                                                            df_2.columns.difference(preferred_order)
+    new_index = preferred_order.intersection(df_1.columns).append(
+                                                            df_1.columns.difference(preferred_order)
                                                             )
-    fig, ax = plt.subplots(figsize=(12,6))
-    df_2[new_index].plot(kind='area', stacked=True, ax=ax, 
-                       color = [tech_colors[i] for i in new_index]
+    fig, ax = plt.subplots(figsize=(12,6), dpi = 300)
+    df_1[new_index].plot(kind='area', stacked=True, ax=ax, 
+                        color = [tech_colors[i] for i in new_index], lw=0
                     )
 
+    # give me len(preferred_order_demand) shades of gray 
+    gray_shades = plt.cm.Greys(np.linspace(0.2, 0.8, len(preferred_order_demand)))
+    for i, tech in enumerate(preferred_order_demand):
+        if tech not in  tech_colors.keys():
+            tech_colors[tech] = gray_shades[i]
+
+    ylim = ax.get_ylim()[1]
+    new_index_demand = preferred_order_demand.intersection(df_2.columns).append(
+                                                            df_2.columns.difference(preferred_order_demand)
+                                                            )
     # remove legend
     ax.legend().remove()
 
-    ax.grid(lw = 0.5, ls = '--')
     ax.set_xlim(2025, 2050)
     ax.set_ylabel("TWh")
 
     # plot heat_demand_agg_series as a dashed line
-    ax.plot(df_1.index, df_1["value"], 
-            color='black', lw=5, ls='--', label='"demand"', zorder = 100)
-    
+    ax.plot(df_2.index, df_2.sum(axis=1), 
+            color='black', lw=3, ls='--', label='"demand"', zorder = 100)
+
+    ax.axhline(y=0, color='white', lw=1, ls="--")
+
     # add legend below plot
     handles, labels = ax.get_legend_handles_labels()
-    fig.legend(handles, labels, loc='lower center', ncol=3, fontsize=12, bbox_to_anchor=(0.5, -0.2))
+    leg_y_pos_1 = -0.25 if not "heat" in var_label else -0.33
+    leg_x_pos_1 = 0.22 if not "heat" in var_label else 0.25
+    fig.legend(handles, labels, loc='lower center', ncol=2, fontsize=12, bbox_to_anchor=(leg_x_pos_1, leg_y_pos_1), title="Supply by source")
+
+    (-df_2.loc[:, new_index_demand]).plot(kind='area', stacked=True, ax=ax, 
+                                        color = [tech_colors[i] for i in new_index_demand], alpha=0.7,
+                                        lw=0
+                                        )
+
+    ax.legend().remove()
+    handles, labels = ax.get_legend_handles_labels()
+
+    nl = len(new_index_demand)
+    leg_y_pos_2 = -0.21 if not "heat" in var_label else -0.21
+    leg_x_pos_2 = 0.7 if not "heat" in var_label else 0.77
+    fig.legend(handles[-nl:], labels[-nl:], loc='lower center', ncol=2, fontsize=12, bbox_to_anchor=(leg_x_pos_2, leg_y_pos_2), title="Demand by sector")
+
+    ax.set_ylim(-ylim, ylim)
+
+    ax.grid(lw = 0.5, ls = '--')
+
+    # grid should be behind the plots
+    ax.set_axisbelow(True)
 
     return fig
