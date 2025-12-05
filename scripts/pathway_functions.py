@@ -277,14 +277,19 @@ def calculate_endogenous_demand(n):
 
     return endogenous_demands
 
-def calculate_nodal_electricity_demand(n):
+def calculate_nodal_electricity_demand(n, exclude_h2_from_demand = False):
     ###############
     # endogenous demand
     end_demand = calculate_endogenous_demand(n)
+    # exclude H2 demand if specified
+    if exclude_h2_from_demand:
+        end_demand = end_demand.T.loc[~end_demand.columns.str.contains("H2")].T
     # group by bus0 (electricity buses where loads are located)
-    end_demand = end_demand.T.groupby(n.links.loc[end_demand.columns].bus0.str.replace(" low voltage", "")).sum()
+    end_demand = end_demand.T.groupby(n.links.loc[end_demand.columns].bus0.str.replace(" low voltage", "")).sum().T
+    # rename buses 
+    end_demand.columns = end_demand.columns.str.replace(" H2", "").str.replace(" gas", "")
     # after renaming, group again to sum any duplicate buses
-    end_demand = end_demand.groupby(end_demand.index).sum().T
+    end_demand = end_demand.T.groupby(end_demand.columns).sum().T
 
     # exogenous demand
     exo_demand = n.loads_t.p[n.loads.carrier[n.loads.carrier.str.contains("electricity")].index]
@@ -295,7 +300,7 @@ def calculate_nodal_electricity_demand(n):
 
     # only use GB nodes
     nodal_demand = nodal_demand.loc[:, nodal_demand.columns.str.contains(country)].T
-    
+
     return nodal_demand
 
 def calculate_electricity_sinks(n):
@@ -1043,12 +1048,14 @@ def make_interactive_map(token, capacity, filename, years, scen, n_mapping = Fal
 
 def plot_energy_mix(variables, scen, years, var_label = "annual_heat_demand_TWh", preferred_order = preferred_order_heating):
     
-    df_1 = pd.DataFrame(index = years) # supply
-    df_2 = pd.DataFrame(index = years) # demand by sector
+    df_1 = pd.DataFrame(index = years) # supply 
+    df_2 = pd.DataFrame(index = years) # sinks (including additional consumption for storage and conversion)
+    df_3 = {}
 
     for year in years:
         var_1 = variables[0][f"{scen}-{year}"].drop(columns = ["country", "parent", "contains", "substations", "geometry"])
         var_2 = variables[1][f"{scen}-{year}"]
+        df_3[year] = variables[2][f"{scen}-{year}"][var_label].sum()
         
         if "heat" in var_label:
             var_1.columns = var_1.columns.str.replace("rural ","")
@@ -1074,6 +1081,7 @@ def plot_energy_mix(variables, scen, years, var_label = "annual_heat_demand_TWh"
     df_1 = df_1[df_1_columns]
     df_2_columns = df_2.columns[df_2.sum() > (threshold * df_2.sum().sum())]
     df_2 = df_2[df_2_columns]
+    df_3 = pd.Series(df_3)
 
     df_2.rename(columns = {"methanol": "methanolisation"}, inplace=True)
 
@@ -1101,17 +1109,13 @@ def plot_energy_mix(variables, scen, years, var_label = "annual_heat_demand_TWh"
     ax.set_xlim(2025, 2050)
     ax.set_ylabel("TWh")
 
-    # plot heat_demand_agg_series as a dashed line
-    # ax.plot(df_2.index, df_2.sum(axis=1), 
-    #         color='black', lw=3, ls='--', label='"demand"', zorder = 100)
-
     ax.axhline(y=0, color='white', lw=1, ls="--")
 
     # add legend below plot
     handles, labels = ax.get_legend_handles_labels()
     leg_y_pos_1 = -0.25 if not "heat" in var_label else -0.33
     leg_x_pos_1 = 0.25 if not "heat" in var_label else 0.25
-    fig.legend(handles, labels, loc='lower center', ncol=2, fontsize=12, bbox_to_anchor=(leg_x_pos_1, leg_y_pos_1), title="Supply by source")
+    fig.legend(handles, labels, loc='lower center', ncol=2, fontsize=fs-1, bbox_to_anchor=(leg_x_pos_1, leg_y_pos_1), title="Supply by source")
 
     (-df_2.loc[:, new_index_demand]).plot(kind='area', stacked=True, ax=ax, 
                                         color = [tech_colors[i] for i in new_index_demand], alpha=0.7,
@@ -1124,10 +1128,17 @@ def plot_energy_mix(variables, scen, years, var_label = "annual_heat_demand_TWh"
     nl = len(new_index_demand)
     leg_y_pos_2 = -0.25 if not "heat" in var_label else -0.25
     leg_x_pos_2 = 0.675 if not "heat" in var_label else 0.77
-    fig.legend(handles[-nl:], labels[-nl:], loc='lower center', ncol=2, fontsize=12, bbox_to_anchor=(leg_x_pos_2, leg_y_pos_2), title="Demand by sector")
+    fig.legend(handles[-nl:], labels[-nl:], loc='lower center', ncol=2, fontsize=fs-1, bbox_to_anchor=(leg_x_pos_2, leg_y_pos_2), title="Demand by sector")
 
     ax.set_ylim(-ylim, ylim)
     ax.grid(lw = 0.5, ls = '--')
     ax.set_axisbelow(True)
+
+    # plot heat_demand_agg_series as a dashed line
+    ax.plot(df_3.index, df_3, 
+            color='black', lw=3, ls='--', label = "demand", zorder = 100)
+    
+    handles, labels = ax.get_legend_handles_labels()
+    ax.legend(handles[-1:], labels[-1:], loc='upper left', fontsize=fs-1)
 
     return fig
