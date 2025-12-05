@@ -177,7 +177,7 @@ variables = [electricity_generation,
 
 for scen in scenarios:
     fig = plot_energy_mix(variables, scen, years, var_label = "annual_elec_demand_TWh", preferred_order = preferred_order)
-    fig.savefig(f"figures/pathway_electricity_generation_mix_{scen}.png", bbox_inches='tight')
+    fig.savefig(f"figures/pathway_electricity_balance_{scen}.png", bbox_inches='tight')
 
 ###############################################################################################################
 ################################# Plot heating generation balance #############################################
@@ -188,7 +188,7 @@ variables = [heating_generation,
 
 for scen in scenarios:
     fig = plot_energy_mix(variables, scen, years, var_label = "annual_heat_demand_TWh", preferred_order = preferred_order_heating)
-    fig.savefig(f"figures/pathway_heating_generation_mix_{scen}.png", bbox_inches='tight')
+    fig.savefig(f"figures/pathway_heating_balance_{scen}.png", bbox_inches='tight')
 
 ###############################################################################################################
 ########################################## Create interactive map #############################################

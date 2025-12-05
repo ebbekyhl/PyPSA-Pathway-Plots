@@ -1075,6 +1075,8 @@ def plot_energy_mix(variables, scen, years, var_label = "annual_heat_demand_TWh"
     df_2_columns = df_2.columns[df_2.sum() > (threshold * df_2.sum().sum())]
     df_2 = df_2[df_2_columns]
 
+    df_2.rename(columns = {"methanol": "methanolisation"}, inplace=True)
+
     new_index = preferred_order.intersection(df_1.columns).append(
                                                             df_1.columns.difference(preferred_order)
                                                             )
@@ -1108,7 +1110,7 @@ def plot_energy_mix(variables, scen, years, var_label = "annual_heat_demand_TWh"
     # add legend below plot
     handles, labels = ax.get_legend_handles_labels()
     leg_y_pos_1 = -0.25 if not "heat" in var_label else -0.33
-    leg_x_pos_1 = 0.22 if not "heat" in var_label else 0.25
+    leg_x_pos_1 = 0.25 if not "heat" in var_label else 0.25
     fig.legend(handles, labels, loc='lower center', ncol=2, fontsize=12, bbox_to_anchor=(leg_x_pos_1, leg_y_pos_1), title="Supply by source")
 
     (-df_2.loc[:, new_index_demand]).plot(kind='area', stacked=True, ax=ax, 
@@ -1120,8 +1122,8 @@ def plot_energy_mix(variables, scen, years, var_label = "annual_heat_demand_TWh"
     handles, labels = ax.get_legend_handles_labels()
 
     nl = len(new_index_demand)
-    leg_y_pos_2 = -0.21 if not "heat" in var_label else -0.21
-    leg_x_pos_2 = 0.7 if not "heat" in var_label else 0.77
+    leg_y_pos_2 = -0.25 if not "heat" in var_label else -0.25
+    leg_x_pos_2 = 0.675 if not "heat" in var_label else 0.77
     fig.legend(handles[-nl:], labels[-nl:], loc='lower center', ncol=2, fontsize=12, bbox_to_anchor=(leg_x_pos_2, leg_y_pos_2), title="Demand by sector")
 
     ax.set_ylim(-ylim, ylim)
