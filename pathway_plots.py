@@ -135,7 +135,7 @@ for s in scenarios:
         links_capacity[f"{s}-{year}"] = calculate_capacities_at_regions(n, links, mapping = mapping, admin_shapes_path = admin_shapes_path)
 
         # Electricity demand
-        elec_demand_i = calculate_nodal_electricity_demand(n)
+        elec_demand_i = calculate_nodal_electricity_demand(n, exclude_h2_from_demand = True)
         annual_nodal_demand = pd.DataFrame(elec_demand_i.sum(axis=1)) / 1e6 * snapshots_weighting # in TWh
         annual_nodal_demand.columns = ["annual_elec_demand_TWh"]
         elec_demand_i_w_region = add_to_regions(annual_nodal_demand, mapping = mapping, admin_shapes_path = admin_shapes_path)
@@ -172,7 +172,8 @@ for s in scenarios:
 ################################# Plot electricity generation balance #########################################
 ###############################################################################################################
 variables = [electricity_generation, 
-             electricity_sinks
+             electricity_sinks,
+             nodal_electricity_demand
             ]
 
 for scen in scenarios:
@@ -183,7 +184,8 @@ for scen in scenarios:
 ################################# Plot heating generation balance #############################################
 ###############################################################################################################
 variables = [heating_generation,
-             heating_sinks
+             heating_sinks,
+             nodal_heating_demand
             ]
 
 for scen in scenarios:
