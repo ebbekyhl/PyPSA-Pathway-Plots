@@ -108,10 +108,11 @@ tech_colors["methanol CHP CC"] = tech_colors["urban central methanol CHP CC"]
 tech_colors["imports"] = "#94073d"
 tech_colors["exports"] = "#e06796"
 tech_colors["biomass to liquid CC"] = tech_colors["biomass to liquid"]
-tech_colors["CCUS"] = tech_colors["CO2 sequestration"]
 tech_colors["urban central biogas CHP"] = "olive"
 tech_colors['TES central discharger'] = "#FFA500"  # orange
+tech_colors['TES central'] = tech_colors['TES central discharger']
 tech_colors['TES decentral discharger'] = "#FF8C00"  # dark orange
+tech_colors['TES decentral'] = tech_colors['TES decentral discharger']
 tech_colors["electrolytic H2"] = tech_colors["H2"]
 tech_colors['heating'] = tech_colors["ground heat pump"]
 tech_colors['residential heating'] = tech_colors["air heat pump"]
@@ -119,9 +120,10 @@ tech_colors["land transport"] = tech_colors["EV battery"]
 tech_colors['residential electricity'] = "#a2a2a2"
 tech_colors['industry electricity'] = "#3f4b38"
 tech_colors['agriculture electricity'] = "#521010"
-tech_colors['CCUS'] = "#ff002b"
+tech_colors["carbon capture"] = "#ff002b"
+tech_colors["rural heat"] = '#d15959'
 tech_colors["urban decentral heat"] = "#ca9c92"
-tech_colors["rural heat"] = "#C30202"
+tech_colors["urban central heat"] = "#C30202"
 tech_colors['electrified heating (urban central)'] = tech_colors["urban central heat"]
 tech_colors['electrified heating (urban decentral)'] = tech_colors["urban decentral heat"]
 tech_colors['electrified heating (rural)'] = tech_colors["rural heat"] 
@@ -129,6 +131,9 @@ tech_colors["agriculture heat"] = "#B4B4B4"  # saddle brown
 tech_colors["low-temperature heat for industry"] = "#656565"  # peru
 tech_colors["medium heat for industry"] = "#291F1A"  # sienna
 tech_colors["high heat for industry"] = "#000000"  # chocolate
+tech_colors["DAC"] = "#FF0066"  # cyan
+tech_colors["H2 electrolysis (waste heat)"] = tech_colors["H2 Electrolysis"]
+tech_colors["net export"] = "#0000FF"  # blue
 
 preferred_order_demand = pd.Index(['residential electricity',
                                     'industry electricity',
@@ -138,9 +143,18 @@ preferred_order_demand = pd.Index(['residential electricity',
                                     'electrified heating (rural)',
                                     'land transport',
                                     'ammonia', 
-                                    'CCUS', 
                                     'electrolytic H2',
+                                    'carbon capture',
                                     ])
+
+preferred_order_demand_heating = pd.Index(['agriculture heat',
+                                            'low-temperature heat for industry',
+                                            'medium heat for industry',
+                                            'high heat for industry',
+                                            'rural heat',
+                                            'urban central heat',
+                                            'urban decentral heat',
+                                            ])
 
 preferred_order_heating = pd.Index([
                                      'air heat pump',
@@ -223,66 +237,108 @@ preferred_order = pd.Index(
 def calculate_endogenous_demand(n):
     
     links_wo_transmission = n.links.drop(n.links.query("carrier == 'DC'").index)
-    
+
     electricity_buses = list(n.buses.query('carrier == "AC"').index) + list(
         n.buses.query('carrier == "low voltage"').index
     )
 
-    boolean_elec_demand_via_links = [
-        links_wo_transmission.bus0[i] in electricity_buses
-        for i in range(len(links_wo_transmission.bus0))
-    ]
-    
-    boolean_elec_demand_via_links_series = pd.Series(boolean_elec_demand_via_links)
-    
-    elec_demand_via_links = links_wo_transmission.iloc[
-        boolean_elec_demand_via_links_series[boolean_elec_demand_via_links_series].index
-    ]
-    
-    # Drop batteries
-    elec_demand_via_links = elec_demand_via_links.drop(
-        elec_demand_via_links.index[elec_demand_via_links.index.str.contains("battery")]
-    )
+    ps = {"bus0": "p0", "bus1": "p1", "bus2": "p2", "bus3": "p3", "bus4": "p4"}
+    endogenous_demands = pd.Series()
+    for bus in ["bus0", "bus1", "bus2", "bus3", "bus4"]:
 
-    # Drop distribution links
-    elec_demand_via_links = elec_demand_via_links.drop(
-        elec_demand_via_links.index[
-            elec_demand_via_links.index.str.contains("distribution")
+        boolean_elec_demand_via_links = [
+            links_wo_transmission[bus][i] in electricity_buses
+            for i in range(len(links_wo_transmission[bus]))
         ]
-    )
+        
+        boolean_elec_demand_via_links_series = pd.Series(boolean_elec_demand_via_links)
+        
+        elec_demand_via_links = links_wo_transmission.iloc[
+            boolean_elec_demand_via_links_series[boolean_elec_demand_via_links_series].index
+        ]
 
-    endogenous_demand = n.links_t.p0[elec_demand_via_links.index]
+        # Drop distribution links
+        elec_demand_via_links = elec_demand_via_links.drop(
+            elec_demand_via_links.index[
+                elec_demand_via_links.index.str.contains("distribution")
+            ]
+        )
 
-    return endogenous_demand
+        endogenous_demands_bus_i = n.links_t[ps[bus]][elec_demand_via_links.index]
 
-def calculate_demand_by_sector(n):
+        endogenous_demands_bus_i_index = endogenous_demands_bus_i.sum()[endogenous_demands_bus_i.sum() > 0].index # only consider positive values (negative values are generators)
+
+        endogenous_demands_bus_i_positive = endogenous_demands_bus_i[endogenous_demands_bus_i_index] #.T.groupby(links_wo_transmission.loc[elec_demand_via_links.index].carrier).sum().sum(axis=1)
+
+        if endogenous_demands_bus_i_positive.shape[1] > 0:
+            endogenous_demands = pd.concat([endogenous_demands, endogenous_demands_bus_i_positive], axis=1)
+        
+    endogenous_demands = endogenous_demands.drop(columns = [0])
+
+    return endogenous_demands
+
+def calculate_nodal_electricity_demand(n):
     ###############
+    # endogenous demand
     end_demand = calculate_endogenous_demand(n)
+    # group by bus0 (electricity buses where loads are located)
+    end_demand = end_demand.T.groupby(n.links.loc[end_demand.columns].bus0.str.replace(" low voltage", "")).sum()
+    # after renaming, group again to sum any duplicate buses
+    end_demand = end_demand.groupby(end_demand.index).sum().T
+
+    # exogenous demand
+    exo_demand = n.loads_t.p[n.loads.carrier[n.loads.carrier.str.contains("electricity")].index]
+    exo_demand = exo_demand.T.groupby(n.loads.loc[n.loads.carrier.str.contains("electricity")].bus.str.replace(" low voltage", "")).sum()
+    exo_demand = exo_demand.groupby(exo_demand.index).sum().T
+
+    nodal_demand = end_demand + exo_demand
+
+    # only use GB nodes
+    nodal_demand = nodal_demand.loc[:, nodal_demand.columns.str.contains(country)].T
+    
+    return nodal_demand
+
+def calculate_electricity_sinks(n):
+    ###############
+    # endogenous demand
+    end_demand = calculate_endogenous_demand(n)
+    # group by bus1 (removing " low voltage") and carrier
     end_demand = end_demand.T.groupby([n.links.loc[end_demand.columns].bus1.str.replace(" low voltage", ""),
                                         n.links.loc[end_demand.columns].carrier]).sum().sum(axis=1)
+    # consider only specified country
     end_demand_UK = end_demand.loc[end_demand.index.get_level_values(0).str.contains(country)]
     end_demand_UK = pd.DataFrame(end_demand_UK)
+    # rename bus1 to exclude region naming
     end_demand_UK["bus1"] = end_demand_UK.index.get_level_values(0).str.replace("GB central england ", "").str.replace("GB north west ", "").str.replace("GB south east ", "").str.replace("GB south west ", "").str.replace("GB wales cymru ", "").str.replace("GB scotland ", "").str.replace("GB north east yorkshire humber ", "").str.replace("GB west midland ", "").str.replace("GB east midland ", "").str.replace("GB greater london ", "").str.replace("GB north ireland 0 ", "").str.replace("GB east ", "")
-
+    # set new index
     end_demand_UK.set_index([end_demand_UK.index.get_level_values(1), 
                                                 end_demand_UK["bus1"]], inplace=True)
     end_demand_UK = end_demand_UK.drop(columns=["bus1"]).groupby(level=[0,1]).sum().reset_index()
-    end_demand_UK_heating = end_demand_UK.loc[end_demand_UK.bus1.str.contains("heat")]
-    end_demand_UK_heating = end_demand_UK_heating.drop(index = end_demand_UK_heating.query("carrier == 'DAC'").index)
-    end_demand_UK_heating["carrier"] = end_demand_UK_heating["bus1"]
 
+    # rename bus1 for "DAC" such that it stays as "DAC"
+    end_demand_UK.loc[end_demand_UK.query("carrier == 'DAC'").index, "bus1"] = "DAC"
+
+    # for the rest, rename carriers to bus1 for a sectoral breakdown
+    end_demand_UK_heating = end_demand_UK.loc[end_demand_UK.bus1.str.contains("heat")]
+    end_demand_UK_heating["carrier"] = end_demand_UK_heating["bus1"]
     end_demand_UK.loc[end_demand_UK_heating.index, :] = end_demand_UK_heating.values
     end_demand_UK = end_demand_UK.set_index("bus1").drop(columns="carrier")
+
     #############
     exo_demand = n.loads_t.p[n.loads.carrier[n.loads.carrier.str.contains("electricity")].index]
     exo_demand = exo_demand.T.groupby([n.loads.loc[exo_demand.columns].bus.str.replace(" low voltage", ""),
                                     n.loads.loc[exo_demand.columns].carrier]).sum().sum(axis=1).unstack()
     exo_demand_UK = exo_demand.loc[exo_demand.index.str.contains(country)].sum()
 
-    demand_by_sector = pd.concat([end_demand_UK, exo_demand_UK])
+    demand_by_sector = pd.concat([end_demand_UK, exo_demand_UK])[0]
+
+    ############ add net export 
+    transmission = calculate_imports(n) # positive = imports, negative = exports
+    net_export = -transmission.sum()
+    demand_by_sector.loc["net export"] = net_export
 
     demand_by_sector.rename(index = {"EV battery": "land transport",
-                                    "DAC": "CCUS",
+                                    "DAC": "carbon capture",
                                     "agriculture electricity": "industry electricity",
                                     "H2": "electrolytic H2",
                                     "Haber-Bosch": "ammonia",
@@ -294,14 +350,70 @@ def calculate_demand_by_sector(n):
 
     demand_by_sector = demand_by_sector.groupby(demand_by_sector.index).sum()
 
-    return demand_by_sector[0]
+    return demand_by_sector
 
-def calculate_heating_demand_by_sector(n):
-    heat_loads = n.loads.loc[n.loads.index.str.contains("heat")]
-    heat_loads_UK = heat_loads.loc[heat_loads.index.str.contains(country)]
-    heat_loads_UK_by_sector = n.loads_t.p[heat_loads_UK.index].T.groupby(heat_loads_UK.carrier).sum().sum(axis=1)
+def calculate_nodal_heating_demand(n):
+    exo_demand = n.loads_t.p[n.loads.carrier[n.loads.carrier.str.contains("heat")].index]
+    exo_demand_bus = n.loads.loc[n.loads.carrier.str.contains("heat")].bus.str.replace("urban central heat", "").str.replace("medium heat for industry", "").str.replace("high heat for industry", "").str.replace("agriculture heat", "").str.replace("rural heat", "").str.replace("urban decentral heat", "").str.strip()
+    exo_demand = exo_demand.T.groupby(exo_demand_bus).sum()
+    exo_demand = exo_demand.groupby(exo_demand.index).sum().T
 
-    return heat_loads_UK_by_sector
+    # only use GB nodes
+    nodal_demand = exo_demand.loc[:, exo_demand.columns.str.contains(country)].T
+    
+    return nodal_demand
+
+def calculate_heating_sinks(n):
+    exo_heat_loads = n.loads.loc[n.loads.index.str.contains("heat")]
+    exo_heat_loads_UK = exo_heat_loads.loc[exo_heat_loads.index.str.contains(country)]
+    exo_heat_loads_UK_by_sector = n.loads_t.p[exo_heat_loads_UK.index].T.groupby(exo_heat_loads_UK.carrier).sum().sum(axis=1)
+
+    # Add TES chargers as endogenous loads
+    heat_buses = n.buses.loc[n.buses.index.str.contains("heat")]
+    heat_buses_UK = heat_buses.loc[heat_buses.index.str.contains(country)]
+
+    endo_heat_loads_UK = n.links.loc[n.links.bus0.isin(heat_buses_UK.index)]
+    endo_heat_loads_UK_sum = n.links_t.p0[endo_heat_loads_UK.index].T.groupby([
+                                                                            endo_heat_loads_UK.carrier,
+                                                                            ]).sum().sum(axis=1)
+
+    heat_loads = pd.concat([exo_heat_loads_UK_by_sector, 
+                            endo_heat_loads_UK_sum], axis=0)
+
+    heat_loads.rename(index = {"urban central water pits charger": "TES central",
+                                "TES central charger": "TES central",
+                                "TES decentral charger": "TES decentral"}, inplace=True)
+
+    heat_loads = heat_loads.groupby(heat_loads.index).sum()
+
+
+    ############ add "negative generators" which act as loads ############
+    # first, links
+    heating_links_p1 = n.links.loc[n.links.bus1.isin(heat_buses.index)]
+    heating_links_p1_UK = heating_links_p1.loc[heating_links_p1.bus1.str.contains(country)]
+    heating_links_p1_UK_sum = -n.links_t.p1[heating_links_p1_UK.index].sum()
+    negative_links = heating_links_p1_UK_sum[heating_links_p1_UK_sum < 0]
+    negative_links_carrier = heating_links_p1_UK.loc[negative_links.index].carrier
+    negative_links_grouped = -negative_links.groupby(negative_links_carrier).sum()
+
+    heat_loads = pd.concat([heat_loads, negative_links_grouped])
+
+    # second, generators
+    heat_generators = n.generators.loc[n.generators.bus.isin(heat_buses.index)]
+    heat_generators_UK = heat_generators.loc[heat_generators.index.str.contains(country)]
+    heat_generators_UK.bus = heat_generators_UK.bus.str.replace("urban central heat", "").str.replace("medium heat for industry", "").str.replace("high heat for industry", "").str.replace("agriculture heat", "").str.replace("rural heat", "").str.replace("urban decentral heat", "").str.strip()
+    heat_generators_UK.carrier = heat_generators_UK.carrier.str.replace("rural ", "").str.replace("urban central ", "").str.replace("urban decentral ", "")
+    heat_generators_UK_t_sum = n.generators_t.p[heat_generators_UK.index].sum()
+
+    heat_generators_UK_t_sum_grouped = heat_generators_UK_t_sum.groupby([heat_generators_UK.bus, 
+                                                                        heat_generators_UK.carrier]).sum().unstack()
+
+    heat_generators_UK_neg_generators = heat_generators_UK_t_sum_grouped.columns[heat_generators_UK_t_sum_grouped.sum() < 0]
+    heat_generators_UK_t_sum_grouped = -heat_generators_UK_t_sum_grouped[heat_generators_UK_neg_generators]
+
+    heat_loads = pd.concat([heat_loads, heat_generators_UK_t_sum_grouped.sum()])
+
+    return heat_loads
 
 def add_year_label(regions_dict, years, scen):
     regions = regions_dict[f"{scen}-2025"][["country", "parent", "contains", "substations", "geometry"]]
@@ -318,6 +430,60 @@ def add_year_label(regions_dict, years, scen):
     regions_geojson = json.loads(regions.to_json())
 
     return regions, regions_geojson
+
+def calculate_imports(n):
+    c = country
+
+    ac_buses = n.buses.query("carrier == 'AC'").country
+    ac_buses_c = ac_buses[ac_buses == c]
+
+    lst_lines_0 = []
+    lst_lines_1 = []
+    lst_links_0 = []
+    lst_links_1 = []
+
+    ac_lines = n.lines
+    dc_links = n.links.query("carrier == 'DC'")
+
+    ac_lines["bus0_short"] = ac_lines["bus0"].str.split(" ", expand=True)[0]
+    ac_lines["bus1_short"] = ac_lines["bus1"].str.split(" ", expand=True)[0]
+
+    dc_links["bus0_short"] = dc_links["bus0"].str.split(" ", expand=True)[0]
+    dc_links["bus1_short"] = dc_links["bus1"].str.split(" ", expand=True)[0]
+
+    for i in range(len(ac_buses_c)):
+        # c == bus0
+        lst_lines_0 += list(ac_lines.bus0[ac_lines.bus0 == ac_buses_c.index[i]].index) 
+        lst_links_0 += list(dc_links.bus0[dc_links.bus0 == ac_buses_c.index[i]].index)
+        
+        # c == bus1
+        lst_lines_1 += list(ac_lines.bus1[ac_lines.bus1 == ac_buses_c.index[i]].index)
+        lst_links_1 += list(dc_links.bus1[dc_links.bus1 == ac_buses_c.index[i]].index) 
+
+    ac_lines_uk_0 = ac_lines.loc[lst_lines_0]
+    dc_links_uk_0 = dc_links.loc[lst_links_0]
+    ac_lines_uk_1 = ac_lines.loc[lst_lines_1]
+    dc_links_uk_1 = dc_links.loc[lst_links_1]
+
+    ac_lines_uk_0_of_interest = ac_lines_uk_0.loc[ac_lines_uk_0.bus0_short != ac_lines_uk_0.bus1_short] # only lines & links leaving or entering UK are of interest
+    ac_lines_uk_1_of_interest = ac_lines_uk_1.loc[ac_lines_uk_1.bus0_short != ac_lines_uk_1.bus1_short] # only lines & links leaving or entering UK are of interest
+    dc_links_uk_0_of_interest = dc_links_uk_0.loc[dc_links_uk_0.bus0_short != dc_links_uk_0.bus1_short] # only lines & links leaving or entering UK are of interest
+    dc_links_uk_1_of_interest = dc_links_uk_1.loc[dc_links_uk_1.bus0_short != dc_links_uk_1.bus1_short] # only lines & links leaving or entering UK are of interest
+
+    # get timeseries for imports and exports of every link and line:
+
+    # c == bus0
+    ac_lines_t_c_0 = n.lines_t.p1[ac_lines_uk_0_of_interest.index] # positive if branch is injecting power to bus0 (i.e., when c is importing)
+    dc_links_t_c_0 = n.links_t.p1[dc_links_uk_0_of_interest.index] # positive if branch is injecting power to bus0 (i.e., when c is importing)
+
+    # c == bus1
+    ac_lines_t_c_1 = n.lines_t.p0[ac_lines_uk_1_of_interest.index] # positive if branch is withdrawing power from bus0 (i.e., when c is importing)
+    dc_links_t_c_1 = n.links_t.p0[dc_links_uk_1_of_interest.index] # positive if branch is withdrawing power from bus0 (i.e., when c is importing)
+
+    # # # collect all imports and exports into one dataframe
+    df_transmission = pd.concat([ac_lines_t_c_0, ac_lines_t_c_1, dc_links_t_c_0, dc_links_t_c_1], axis=1).sum(axis=1)
+
+    return df_transmission
 
 def calculate_capacities_at_regions(n, techs, mapping = False, admin_shapes_path = "data/admin_shapes.geojson"):
     carriers_dict = {"onshore wind": "onwind",
@@ -514,33 +680,34 @@ def add_to_regions(df, mapping = False, admin_shapes_path = "data/admin_shapes.g
     regions.loc[:, df.columns] = df
     return regions
 
-def calculate_generation_mix(n):
+def calculate_electricity_mix(n):
 
-    # HV buses
-    buses = n.buses.query("carrier == 'AC'").index # high voltage buses
-    AC_generators = [x for x in n.generators.index if n.generators.loc[x].bus in buses] # high voltage generators
+    electricity_buses = list(n.buses.query('carrier == "AC"').index) + list(
+        n.buses.query('carrier == "low voltage"').index
+    )
+
+    elec_generators = [x for x in n.generators.index if n.generators.loc[x].bus in electricity_buses] # high voltage generators
     links = n.links.copy() # every link in the network
     links = links.drop(links.query("carrier == 'DC'").index) # without DC transmission lines
 
-    electricity_generation_links = [x for x in links.index if links.loc[x].bus1 in buses] # electricity generation links
-
-    # LV buses
-    buses_lv = n.buses.query("carrier == 'low voltage'").index # low voltage buses
-    lv_generators = [x for x in n.generators.index if n.generators.loc[x].bus in buses_lv] # low voltage generators
+    electricity_generation_links = [x for x in links.index if links.loc[x].bus1 in electricity_buses] # electricity generation links
 
     # initialize dataframe
-    df_1 = n.generators_t.p[AC_generators].sum().groupby([n.generators.loc[AC_generators].bus, n.generators.loc[AC_generators].carrier]).sum()
-
-    df_2 = n.generators_t.p[lv_generators].sum().groupby([n.generators.loc[lv_generators].bus.str.replace(" low voltage", ""), n.generators.loc[lv_generators].carrier]).sum()
-
-    df_3 = -n.links_t.p1[electricity_generation_links].sum().groupby([n.links.loc[electricity_generation_links].bus1, n.links.loc[electricity_generation_links].carrier]).sum()
-    df_3.drop(index = df_3.loc[df_3.index.get_level_values(1).str.contains("discharge")].index, inplace=True)
-    df_3.drop(index = df_3.loc[df_3.index.get_level_values(1).str.contains("Fuel Cell")].index, inplace=True)
-    df_3.drop(index = df_3.loc[df_3.index.get_level_values(1).str.contains("electricity distribution grid")].index, inplace=True)
+    df_1 = n.generators_t.p[elec_generators].sum().groupby([n.generators.loc[elec_generators].bus.str.replace(" low voltage", ""), 
+                                                            n.generators.loc[elec_generators].carrier]).sum()
     
-    df_4 = n.storage_units_t.p[n.storage_units.query("carrier == 'hydro'").index].sum().groupby([n.storage_units.loc[n.storage_units.query("carrier == 'hydro'").index].bus, n.storage_units.loc[n.storage_units.query("carrier == 'hydro'").index].carrier]).sum()
+    df_2 = -n.links_t.p1[electricity_generation_links].sum().groupby([n.links.loc[electricity_generation_links].bus1.str.replace(" low voltage", ""), 
+                                                                      n.links.loc[electricity_generation_links].carrier]).sum()
+    
+    df_2.drop(index = df_2.loc[df_2.index.get_level_values(1).str.contains("electricity distribution grid")].index, inplace=True)
+    
+    df_3 = n.storage_units_t.p[n.storage_units.query("carrier == 'hydro'").index].sum().groupby([n.storage_units.loc[n.storage_units.query("carrier == 'hydro'").index].bus, 
+                                                                                                 n.storage_units.loc[n.storage_units.query("carrier == 'hydro'").index].carrier]).sum()
+    
+    df_4 = n.storage_units_t.p[n.storage_units.query("carrier == 'PHS'").index].sum().groupby([n.storage_units.loc[n.storage_units.query("carrier == 'PHS'").index].bus, 
+                                                                                               n.storage_units.loc[n.storage_units.query("carrier == 'PHS'").index].carrier]).sum()
 
-    # # aggregated by technology (for every hour)
+    # # aggregated by technology
     df = pd.concat([df_1, df_2, df_3, df_4], axis=0).sort_index()
 
     # only use GB nodes
@@ -548,59 +715,45 @@ def calculate_generation_mix(n):
 
     return df
 
-def calculate_heating_generation_mix(n):
+def calculate_heating_mix(n):
     heating_buses = n.buses.loc[n.buses.carrier.str.contains("heat")].index
 
-    heating_links_p1 = n.links.loc[n.links.bus1.isin(heating_buses)]
-    heating_links_p2 = n.links.loc[n.links.bus2.isin(heating_buses)]
+    heating_links = {}
+    ps = {"bus1": "p1", "bus2": "p2", "bus3": "p3", "bus4": "p4"}
+    for bus in ["bus1", "bus2", "bus3", "bus4"]:
+        heating_links_bus_i = n.links.loc[n.links[bus].isin(heating_buses)]
+        heating_links_bus_i["bus"] = heating_links_bus_i[bus].str.replace("urban central heat", "").str.replace("medium heat for industry", "").str.replace("high heat for industry", "").str.replace("agriculture heat", "").str.replace("rural heat", "").str.replace("urban decentral heat", "").str.strip()
+        heating_links_bus_i_grouped = -n.links_t[ps[bus]][heating_links_bus_i.index].T.groupby([heating_links_bus_i.carrier, 
+                                                                                                heating_links_bus_i.bus]).sum().T
+        heating_links_bus_i_grouped = heating_links_bus_i_grouped.T.swaplevel(0,1).sum(axis=1).unstack()
+        heating_links[bus] = heating_links_bus_i_grouped
 
-    heating_links_p1["bus"] = heating_links_p1["bus1"].str.replace("urban central heat", "").str.replace("medium heat for industry", "").str.replace("high heat for industry", "").str.replace("agriculture heat", "").str.replace("rural heat", "").str.replace("urban decentral heat", "").str.strip()
-    heating_links_p2["bus"] = heating_links_p2["bus2"].str.replace("urban central heat", "").str.replace("medium heat for industry", "").str.replace("high heat for industry", "").str.replace("agriculture heat", "").str.replace("rural heat", "").str.replace("urban decentral heat", "").str.strip()
-
-    heating_generation_p1 = -n.links_t.p1[heating_links_p1.index].T.groupby([heating_links_p1.carrier, 
-                                                                            heating_links_p1.bus]).sum().T
-
-    heating_generation_p1 = heating_generation_p1.T.swaplevel(0,1).sum(axis=1).unstack()
-
-    heating_generation_p2 = -n.links_t.p2[heating_links_p2.index].T.groupby([heating_links_p2.carrier,
-                                                                            heating_links_p2.bus]).sum().T
-
-    heating_generation_p2 = heating_generation_p2.T.swaplevel(0,1).sum(axis=1).unstack()
-
-    heating_generation = heating_generation_p1.copy()
-    heating_generation.loc[:, heating_generation_p2.columns] = heating_generation_p2
+    heating_generation = heating_links["bus1"]
+    for bus in ["bus2", "bus3", "bus4"]:
+        heating_generation.loc[:, heating_links[bus].columns] = heating_links[bus]
 
     # get UK elements
     heating_generation_uk = heating_generation.loc[heating_generation.index.str.contains(country)]
 
+    # remove "DAC" from heating generation mix (and other negative generators which are in fact loads)
+    heating_generation_uk = heating_generation_uk.T.loc[heating_generation_uk.sum() > 0].T
+
+    # include also "generators" components
+    heat_generators = n.generators.loc[n.generators.bus.isin(heating_buses)]
+    heat_generators_UK = heat_generators.loc[heat_generators.index.str.contains(country)]
+    heat_generators_UK.bus = heat_generators_UK.bus.str.replace("urban central heat", "").str.replace("medium heat for industry", "").str.replace("high heat for industry", "").str.replace("agriculture heat", "").str.replace("rural heat", "").str.replace("urban decentral heat", "").str.strip()
+    heat_generators_UK.carrier = heat_generators_UK.carrier.str.replace("rural ", "").str.replace("urban central ", "").str.replace("urban decentral ", "")
+    heat_generators_UK_t_sum = n.generators_t.p[heat_generators_UK.index].sum()
+
+    heat_generators_UK_t_sum_grouped = heat_generators_UK_t_sum.groupby([heat_generators_UK.bus, 
+                                                                        heat_generators_UK.carrier]).sum().unstack()
+
+    heat_generators_UK_pos_generators = heat_generators_UK_t_sum_grouped.columns[heat_generators_UK_t_sum_grouped.sum() > 0]
+    heat_generators_UK_t_sum_grouped = heat_generators_UK_t_sum_grouped[heat_generators_UK_pos_generators]
+
+    heating_generation_uk.loc[:, heat_generators_UK_t_sum_grouped.columns] = heat_generators_UK_t_sum_grouped
+
     return heating_generation_uk
-
-def calculate_electricity_demand(n):
-    end_demand = calculate_endogenous_demand(n)
-    end_demand = end_demand.T.groupby(n.links.loc[end_demand.columns].bus0.str.replace(" low voltage", "")).sum()
-    end_demand = end_demand.groupby(end_demand.index).sum().T
-
-    exo_demand = n.loads_t.p[n.loads.carrier[n.loads.carrier.str.contains("electricity")].index]
-    exo_demand = exo_demand.T.groupby(n.loads.loc[n.loads.carrier.str.contains("electricity")].bus.str.replace(" low voltage", "")).sum()
-    exo_demand = exo_demand.groupby(exo_demand.index).sum().T
-
-    nodal_demand = end_demand + exo_demand
-
-    # only use GB nodes
-    nodal_demand = nodal_demand.loc[:, nodal_demand.columns.str.contains(country)].T
-    
-    return nodal_demand
-
-def calculate_heating_demand(n):
-    exo_demand = n.loads_t.p[n.loads.carrier[n.loads.carrier.str.contains("heat")].index]
-    exo_demand_bus = n.loads.loc[n.loads.carrier.str.contains("heat")].bus.str.replace("urban central heat", "").str.replace("medium heat for industry", "").str.replace("high heat for industry", "").str.replace("agriculture heat", "").str.replace("rural heat", "").str.replace("urban decentral heat", "").str.strip()
-    exo_demand = exo_demand.T.groupby(exo_demand_bus).sum()
-    exo_demand = exo_demand.groupby(exo_demand.index).sum().T
-
-    # only use GB nodes
-    nodal_demand = exo_demand.loc[:, exo_demand.columns.str.contains(country)].T
-    
-    return nodal_demand
 
 def make_interactive_map(token, capacity, filename, years, scen, n_mapping = False):
     regions, regions_geojson = add_year_label(capacity, years, scen)
@@ -899,15 +1052,28 @@ def plot_energy_mix(variables, scen, years, var_label = "annual_heat_demand_TWh"
         
         if "heat" in var_label:
             var_1.columns = var_1.columns.str.replace("rural ","")
-            var_1 = var_1.T.groupby(var_1.columns).sum().T.drop(columns = ["DAC"])
+            var_1 = var_1.T.groupby(var_1.columns).sum().T
+            var_1 = var_1.drop(columns = [# "DAC",
+                                          # "TES central discharger",
+                                          # "TES decentral discharger",
+                                          # "TES central charger",
+                                          # "TES decentral charger"
+                                          ])
 
         df_1.loc[year, 
                 var_1.columns] = var_1.sum()
 
         df_2.loc[year, var_2.index] = var_2.values
 
-    new_columns = df_1.columns[df_1.sum() / (df_1.sum().sum()) > 0.001]
-    df_1 = df_1[new_columns]
+    df_1.rename(columns = {"TES central discharger": "TES central",
+                           "TES decentral discharger": "TES decentral",
+                           "H2 Electrolysis": "H2 electrolysis (waste heat)"}, inplace=True)
+
+    threshold = 0.001 # 0.1% threshold
+    df_1_columns = df_1.columns[df_1.sum() > (threshold * df_1.sum().sum())] 
+    df_1 = df_1[df_1_columns]
+    df_2_columns = df_2.columns[df_2.sum() > (threshold * df_2.sum().sum())]
+    df_2 = df_2[df_2_columns]
 
     new_index = preferred_order.intersection(df_1.columns).append(
                                                             df_1.columns.difference(preferred_order)
@@ -917,15 +1083,15 @@ def plot_energy_mix(variables, scen, years, var_label = "annual_heat_demand_TWh"
                         color = [tech_colors[i] for i in new_index], lw=0
                     )
 
-    # give me len(preferred_order_demand) shades of gray 
-    gray_shades = plt.cm.Greys(np.linspace(0.2, 0.8, len(preferred_order_demand)))
-    for i, tech in enumerate(preferred_order_demand):
+    preferred_order_demand_i = preferred_order_demand if not "heat" in var_label else preferred_order_demand_heating
+    gray_shades = plt.cm.Greys(np.linspace(0.2, 0.8, len(preferred_order_demand_i)))
+    for i, tech in enumerate(preferred_order_demand_i):
         if tech not in  tech_colors.keys():
             tech_colors[tech] = gray_shades[i]
 
-    ylim = ax.get_ylim()[1]
-    new_index_demand = preferred_order_demand.intersection(df_2.columns).append(
-                                                            df_2.columns.difference(preferred_order_demand)
+    ylim = 1900 if not "heat" in var_label else 600
+    new_index_demand = preferred_order_demand_i.intersection(df_2.columns).append(
+                                                            df_2.columns.difference(preferred_order_demand_i)
                                                             )
     # remove legend
     ax.legend().remove()
@@ -934,8 +1100,8 @@ def plot_energy_mix(variables, scen, years, var_label = "annual_heat_demand_TWh"
     ax.set_ylabel("TWh")
 
     # plot heat_demand_agg_series as a dashed line
-    ax.plot(df_2.index, df_2.sum(axis=1), 
-            color='black', lw=3, ls='--', label='"demand"', zorder = 100)
+    # ax.plot(df_2.index, df_2.sum(axis=1), 
+    #         color='black', lw=3, ls='--', label='"demand"', zorder = 100)
 
     ax.axhline(y=0, color='white', lw=1, ls="--")
 
@@ -959,10 +1125,7 @@ def plot_energy_mix(variables, scen, years, var_label = "annual_heat_demand_TWh"
     fig.legend(handles[-nl:], labels[-nl:], loc='lower center', ncol=2, fontsize=12, bbox_to_anchor=(leg_x_pos_2, leg_y_pos_2), title="Demand by sector")
 
     ax.set_ylim(-ylim, ylim)
-
     ax.grid(lw = 0.5, ls = '--')
-
-    # grid should be behind the plots
     ax.set_axisbelow(True)
 
     return fig
